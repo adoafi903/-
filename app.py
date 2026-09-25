@@ -376,7 +376,8 @@ class App:
             dest = tempfile.mkdtemp(prefix="iphone_")
 
             def prep(report, stop):
-                name = iphone.import_usb(dest, lambda a, b: report(f"iPhone から写真・動画を読み込んでいます… {a} / {b} 件", a / b if b else 0), stop)
+                name = iphone.import_usb(dest, lambda a, b: report(f"iPhone から写真・動画を読み込んでいます… {a} / {b} 件", a / b if b else 0), stop,
+                                         on_wait=lambda text, left: report(f"{text}（あと {left} 秒待ちます）", 0))
                 report(f"{name} から読み込みました。一覧を作っています…", 1)
                 return iphone.folder_targets(dest)
             self.begin_targets(None, item["name"], prep=prep)

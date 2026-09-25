@@ -124,23 +124,38 @@ foreach ($i in $sh.NameSpace(17).Items()) { if ($i.Name -match 'iPhone|iPad|iPod
 # Copies every photo and video in the phone's DCIM folders. Only ASCII in this script so
 # Windows PowerShell reads it correctly without a byte-order mark.
 _IMPORT_PS = r"""
-param([string]$dest)
+param([string]$dest, [int]$wait = 90)
 [Console]::OutputEncoding=[Text.Encoding]::UTF8
-$sh = New-Object -ComObject Shell.Application
-$dev = $null
-foreach ($i in $sh.NameSpace(17).Items()) { if ($i.Name -match 'iPhone|iPad|iPod') { $dev = $i; break } }
-if (-not $dev) { Write-Output 'ERR nodevice'; exit }
-Write-Output ('DEV ' + $dev.Name)
-$storage = $null
-foreach ($i in $dev.GetFolder.Items()) { $storage = $i; break }
-if (-not $storage) { Write-Output 'ERR locked'; exit }
+$deadline = (Get-Date).AddSeconds($wait)
 $dcim = $null
-foreach ($i in $storage.GetFolder.Items()) { if ($i.Name -eq 'DCIM') { $dcim = $i } }
-if (-not $dcim) { Write-Output 'ERR locked'; exit }
+while ($true) {
+  # A fresh Shell object each round, so a phone that was just trusted is seen.
+  $sh = New-Object -ComObject Shell.Application
+  $dev = $null
+  foreach ($i in $sh.NameSpace(17).Items()) { if ($i.Name -match 'iPhone|iPad|iPod') { $dev = $i; break } }
+  $state = 'nodevice'
+  if ($dev) {
+    $state = 'locked'
+    foreach ($storage in $dev.GetFolder.Items()) {
+      foreach ($i in $storage.GetFolder.Items()) { if ($i.Name -eq 'DCIM') { $dcim = $i } }
+    }
+  }
+  if ($dcim) { break }
+  $left = [int]($deadline - (Get-Date)).TotalSeconds
+  if ($left -le 0) {
+    $svc = Get-Service -Name 'Apple Mobile Device Service' -ErrorAction SilentlyContinue
+    if ($state -eq 'locked' -and -not $svc) { $state = 'locked-nodriver' }
+    Write-Output ('ERR ' + $state); exit
+  }
+  Write-Output ('WAIT ' + $state + ' ' + $left)
+  Start-Sleep -Seconds 2
+}
+Write-Output ('DEV ' + $dev.Name)
 $subs = @($dcim.GetFolder.Items() | Where-Object { $_.IsFolder })
 $total = 0
 foreach ($s in $subs) { $total += $s.GetFolder.Items().Count }
 Write-Output ('TOTAL ' + $total)
+if ($total -eq 0) { Write-Output 'ERR empty'; exit }
 $done = 0
 foreach ($s in $subs) {
   $d = Join-Path $dest $s.Name
@@ -200,12 +215,22 @@ def detect_usb():
     return []
 
 
-def import_usb(dest, on_progress, stop):
+MANUAL_COPY = ("別の方法：エクスプローラーで「PC」→「Apple iPhone」→「Internal Storage」→「DCIM」を開き、中のフォルダを"
+               "パソコンにコピーしてから、このアプリの「フォルダを選んで調べる…」でそのフォルダを選んでください。")
+
+WAIT_TEXT = {
+    "nodevice": "iPhone を探しています。USB ケーブルでつないでください",
+    "locked": "iPhone のロックを解除し、「このコンピュータを信頼しますか？」と出たら「信頼」を押してパスコードを入れてください。押すと自動で続きます",
+}
+
+
+def import_usb(dest, on_progress, stop, on_wait=None, wait=90):
     """Copy the phone's current photos and videos into dest (Windows). Returns the device name.
 
+    Waits up to `wait` seconds for the phone to be connected, unlocked and trusted.
     Raises RuntimeError with a message for the user when the phone cannot be read.
     """
-    proc, script = _ps(_IMPORT_PS, ["-dest", dest], stream=True)
+    proc, script = _ps(_IMPORT_PS, ["-dest", dest, "-wait", str(wait)], stream=True)
     name, err = "iPhone", None
     try:
         for line in proc.stdout:
@@ -213,7 +238,10 @@ def import_usb(dest, on_progress, stop):
             if stop.is_set():
                 proc.kill()
                 break
-            if line.startswith("DEV "):
+            if line.startswith("WAIT ") and on_wait:
+                _, state, left = line.split()
+                on_wait(WAIT_TEXT.get(state, WAIT_TEXT["locked"]), int(left))
+            elif line.startswith("DEV "):
                 name = line[4:]
             elif line.startswith("PROG "):
                 a, b = line.split()[1:3]
@@ -227,9 +255,21 @@ def import_usb(dest, on_progress, stop):
         except OSError:
             pass
     if err == "nodevice":
-        raise RuntimeError("iPhone が見つかりませんでした。USB ケーブルでつなぎ直してから、もう一度選んでください。")
-    if err == "locked":
-        raise RuntimeError("iPhone の中が見えません。iPhone のロックを解除し、「このコンピュータを信頼しますか？」と出たら「信頼」を押してから、もう一度選んでください。")
+        raise RuntimeError("iPhone が見つかりませんでした。USB ケーブルでつなぎ直してから、もう一度選んでください。\n"
+                           "充電専用のケーブルでは読めません。iPhone に付属のケーブルなど、データ通信できるものを使ってください。")
+    if err and err.startswith("locked"):
+        tips = ["iPhone の中が見えませんでした。次を試してから、もう一度選んでください。",
+                "・iPhone のロックを解除したままにする（画面を消さない）",
+                "・ケーブルを抜いて差し直し、「このコンピュータを信頼しますか？」で「信頼」→ パスコードを入力",
+                "・「信頼」が出ないときは、iPhone の「設定」→「一般」→「転送またはiPhoneをリセット」→「リセット」→「位置情報とプライバシーをリセット」のあと、つなぎ直す"]
+        if err == "locked-nodriver":
+            tips.append("・Microsoft Store から無料の「Apple Devices」アプリを入れる（iPhone をつなぐための部品が入ります）")
+        tips.append(MANUAL_COPY)
+        raise RuntimeError("\n".join(tips))
+    if err == "empty":
+        raise RuntimeError("iPhone の中に写真・動画が見つかりませんでした。\n"
+                           "iCloud 写真の「iPhone のストレージを最適化」を使っていると、元の写真は iCloud にだけあります。"
+                           "その場合は icloud.com の「写真」からダウンロードしてください。")
     return name
 
 
