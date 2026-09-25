@@ -32,6 +32,9 @@ jobs:
         run: python -c "import fukugen, app; print('ok')"
       - name: Recovery self-test
         run: python selftest.py
+      - name: iPhone USB script runs (no phone attached)
+        if: runner.os == 'Windows'
+        run: python ci_usb_check.py
       - name: Build Windows app
         if: runner.os == 'Windows'
         run: |

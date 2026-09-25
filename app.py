@@ -23,6 +23,7 @@ import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
 import fukugen as core
+import iphone
 
 try:
     from PIL import Image, ImageDraw, ImageFile, ImageOps, ImageTk
@@ -176,7 +177,7 @@ class App:
         self.q = queue.Queue()
         self.work = queue.PriorityQueue()
         self.drives = []
-        self.source_path = None
+        self.targets = []
         self.source_item = None
         self.source_size = 0
         self.stop = threading.Event()
@@ -232,8 +233,8 @@ class App:
     # -------------------------------------------------- page 1
     def build_start(self):
         f = self.start = ttk.Frame(self.root, padding=24)
-        ttk.Label(f, text="復元したいドライブを選んでください", font=self.f_title).pack(anchor="w")
-        ttk.Label(f, text="SD カード、USB メモリ、外付けドライブ、パソコンのドライブから、削除した写真と動画を探します。元のドライブには書き込みません。",
+        ttk.Label(f, text="調べたいドライブや iPhone を選んでください", font=self.f_title).pack(anchor="w")
+        ttk.Label(f, text="SD カード、USB メモリ、外付けドライブ、パソコンのドライブ、iPhone とそのバックアップから写真と動画を探します。元のデータには書き込みません。",
                   style="Muted.TLabel", wraplength=1000).pack(anchor="w", pady=(4, 14))
         self.admin_bar = ttk.Frame(f)
         self.admin_bar.pack(fill="x")
@@ -257,12 +258,14 @@ class App:
         bar = ttk.Frame(f)
         bar.pack(fill="x", pady=(14, 0))
         ttk.Button(bar, text="一覧を更新", command=self.refresh_drives).pack(side="left")
-        ttk.Button(bar, text="イメージファイルを開く…", command=self.pick_image).pack(side="left", padx=8)
+        ttk.Button(bar, text="ファイルを選んで調べる…", command=self.pick_files).pack(side="left", padx=(8, 0))
+        ttk.Button(bar, text="フォルダを選んで調べる…", command=self.pick_folder).pack(side="left", padx=8)
         self.scan_btn = ttk.Button(bar, text="スキャンを始める", style="Accent.TButton", command=self.start_scan, state="disabled")
         self.scan_btn.pack(side="right")
         tips = ("・消したドライブには、写真を撮ったりファイルを保存したりしないでください。上書きされると戻せなくなります。\n"
                 "・SD カードがドライブ文字で出てこない、「フォーマットしますか」と聞かれる場合は「ディスク ○ 全体」を選んでください。\n"
-                "・SSD から消したデータは、すぐに消去されている（TRIM）ことが多く、見つからない場合があります。スマホ本体の中身は暗号化されているため読めません。")
+                "・SSD から消したデータは、すぐに消去されている（TRIM）ことが多く、見つからない場合があります。\n"
+                "・iPhone は中身が暗号化されているため、USB でつないでも「今ある写真」しか読めません。消した写真は、消す前に作った iPhone のバックアップから探せます。")
         ttk.Label(f, text=tips, style="Muted.TLabel", justify="left", wraplength=1100).pack(anchor="w", pady=(18, 0))
 
     def refresh_drives(self):
@@ -276,7 +279,23 @@ class App:
         self.drive_tree.delete(*self.drive_tree.get_children())
         self.drive_tree.insert("", "end", iid="loading", values=("ドライブを調べています…",))
         self.root.update_idletasks()
-        threading.Thread(target=lambda: self.q.put(("drives", core.list_drives())), daemon=True).start()
+        threading.Thread(target=self.gather_sources, daemon=True).start()
+
+    def gather_sources(self):
+        items = []
+        for name in iphone.detect_usb():
+            items.append({"type": "usb", "name": name, "label": f"【iPhone】{name}（USB で接続中）— 今 iPhone にある写真・動画を読み込む"})
+        backups, denied = iphone.find_backups()
+        for b in backups:
+            when = b["date"].strftime("%Y/%m/%d %H:%M") if b["date"] else "日時不明"
+            items.append({"type": "backup", "path": b["path"], "encrypted": b["encrypted"],
+                          "label": f"【iPhone のバックアップ】{b['device']}（{when} に作成{'・暗号化あり' if b['encrypted'] else ''}）— 消す前の写真が残っている可能性"})
+        for d in denied:
+            items.append({"type": "denied", "path": d, "label": "【iPhone のバックアップ】あるかもしれませんが、読む許可がありません（選ぶと設定方法を表示）"})
+        for d in core.list_drives():
+            d["type"] = "drive"
+            items.append(d)
+        self.q.put(("drives", items))
 
     def elevate(self):
         if relaunch_elevated():
@@ -289,20 +308,78 @@ class App:
             return
         item = self.drives[int(sel[0])]
         self.scan_btn.state(["!disabled"])
-        self.drive_note.configure(text=("これはパソコン本体のドライブです。使っている間も書き込みが続くため、消したファイルが上書きされている場合があります。"
-                                        if item.get("system") else ""))
+        notes = {"usb": "iPhone の中の写真と動画をこのパソコンに読み込んでから一覧にします。iPhone のロックを解除しておいてください。削除した写真は iPhone の仕組み上ここでは読めないため、バックアップも調べてください。",
+                 "backup": "バックアップを作った時点で iPhone にあった写真・動画を取り出します。消す前のバックアップなら、消した写真も入っています。新しいバックアップを作ると上書きされるので、復元が終わるまで作らないでください。",
+                 "denied": ""}
+        text = notes.get(item["type"])
+        if text is None:
+            text = "これはパソコン本体のドライブです。使っている間も書き込みが続くため、消したファイルが上書きされている場合があります。" if item.get("system") else ""
+        self.drive_note.configure(text=text)
 
-    def pick_image(self):
-        p = filedialog.askopenfilename(title="ドライブのイメージファイルを選んでください",
-                                       filetypes=[("イメージファイル", "*.img *.dd *.bin *.raw *.iso *.dmg *.001"), ("すべてのファイル", "*")])
-        if p:
-            self.begin(p, None)
+    def pick_files(self):
+        paths = filedialog.askopenfilenames(title="調べるファイルを選んでください（複数選べます）",
+                                            filetypes=[("すべてのファイル", "*"), ("写真・動画", "*.jpg *.jpeg *.heic *.png *.gif *.mov *.mp4"),
+                                                       ("ドライブのイメージ", "*.img *.dd *.bin *.raw *.iso *.dmg *.001")])
+        if paths:
+            label = os.path.basename(paths[0]) if len(paths) == 1 else f"{len(paths)} 個のファイル"
+            self.begin_targets([iphone.file_target(p) for p in paths], label)
+
+    def pick_folder(self):
+        d = filedialog.askdirectory(title="調べるフォルダを選んでください")
+        if not d:
+            return
+        try:
+            targets = iphone.folder_targets(d)
+        except iphone.EncryptedBackup:
+            self.encrypted_help()
+            return
+        if not targets:
+            messagebox.showinfo(APP_NAME, "このフォルダには調べられるファイルがありませんでした。")
+            return
+        self.begin_targets(targets, os.path.basename(d.rstrip("/\\")) or d)
+
+    def encrypted_help(self):
+        messagebox.showinfo(APP_NAME, "このバックアップはパスワードで暗号化されているため、このアプリでは中身を読めません。\n\n"
+                            "新しいバックアップを作ると、消した写真が入った古いバックアップが上書きされることがあります。復元が終わるまで新しいバックアップは作らないでください。")
 
     def start_scan(self):
         sel = self.drive_tree.selection()
-        if sel and sel[0].isdigit():
-            item = self.drives[int(sel[0])]
+        if not (sel and sel[0].isdigit()):
+            return
+        item = self.drives[int(sel[0])]
+        t = item["type"]
+        if t == "drive":
             self.begin(item["path"], item)
+        elif t == "backup":
+            if item["encrypted"]:
+                self.encrypted_help()
+                return
+            try:
+                targets = iphone.backup_targets(item["path"])
+            except iphone.EncryptedBackup:
+                self.encrypted_help()
+                return
+            if not targets:
+                messagebox.showinfo(APP_NAME, "このバックアップには写真・動画が入っていませんでした。")
+                return
+            self.begin_targets(targets, item["label"].split("—")[0].strip())
+        elif t == "denied":
+            messagebox.showinfo(APP_NAME, "Mac の設定で、このアプリが iPhone のバックアップを読むことを許可してください。\n\n"
+                                "「システム設定」→「プライバシーとセキュリティ」→「フルディスクアクセス」で「Fukugen」（Python から起動した場合は「ターミナル」）をオンにして、アプリを開き直してください。")
+        elif t == "usb":
+            if core.IS_MAC:
+                messagebox.showinfo(APP_NAME, "Mac では、iPhone の写真を直接読み込めません。\n\n"
+                                    "1. これから開く「イメージキャプチャ」で iPhone を選び、読み込み先を新しいフォルダにして「すべてを読み込む」を押します。\n"
+                                    "2. 終わったら、このアプリの「フォルダを選んで調べる…」でそのフォルダを選びます。")
+                subprocess.Popen(["open", "-a", "Image Capture"])
+                return
+            dest = tempfile.mkdtemp(prefix="iphone_")
+
+            def prep(report, stop):
+                name = iphone.import_usb(dest, lambda a, b: report(f"iPhone から写真・動画を読み込んでいます… {a} / {b} 件", a / b if b else 0), stop)
+                report(f"{name} から読み込みました。一覧を作っています…", 1)
+                return iphone.folder_targets(dest)
+            self.begin_targets(None, item["name"], prep=prep)
 
     # -------------------------------------------------- page 2
     def build_results(self):
@@ -374,17 +451,24 @@ class App:
             messagebox.showerror(APP_NAME, "ドライブの大きさを読み取れませんでした。別のドライブを選んでください。")
             src.close()
             return
+        src.close()
+        label = (item or {}).get("label", os.path.basename(path)).strip()
+        self.begin_targets([{"path": path, "orig": None, "label": label}], label, item)
+
+    def begin_targets(self, targets, label, item=None, prep=None):
         self.reset()
-        self.source_path, self.source_item, self.source_size = path, item, src.size
-        self.src_label.configure(text=f"{(item or {}).get('label', os.path.basename(path)).strip()}")
+        self.source_item = item
+        self.targets = targets or []
+        self.src_label.configure(text=label)
         self.show(self.results)
         self.scanning = True
         self.stop.clear()
         self.stop_btn.state(["!disabled"])
         self.t0 = time.time()
         gen = self.gen
-        threading.Thread(target=self.scan_worker, args=(src, gen), daemon=True).start()
-        threading.Thread(target=self.media_worker, args=(path, gen), daemon=True).start()
+        self.status.configure(text="準備しています…")
+        threading.Thread(target=self.scan_worker, args=(targets, prep, gen), daemon=True).start()
+        threading.Thread(target=self.media_worker, args=(gen,), daemon=True).start()
 
     def reset(self):
         self.gen += 1
@@ -403,40 +487,69 @@ class App:
         self.work = queue.PriorityQueue()
         self.update_selection()
 
-    def scan_worker(self, src, gen):
-        last = [0.0]
+    def scan_worker(self, targets, prep, gen):
         keep_small, all_off = self.keep_small.get(), self.all_offsets.get()
-
-        def prog(p):
-            if time.time() - last[0] > 0.2:
-                last[0] = time.time()
-                self.q.put(("prog", gen, p))
-
+        bad = 0
         try:
-            for r in core.iter_scan(src, all_off, self.stop, prog):
-                if gen != self.gen:
+            if prep:
+                targets = prep(lambda text, frac: self.q.put(("stage", gen, text, frac)), self.stop)
+            self.q.put(("targets", gen, targets))
+            sizes = []
+            for t in targets:
+                try:
+                    sizes.append(os.path.getsize(t["path"]) if os.path.isfile(t["path"]) else 0)
+                except OSError:
+                    sizes.append(0)
+            done, last = 0, [0.0]
+            for ti, t in enumerate(targets):
+                if self.stop.is_set() or gen != self.gen:
                     break
-                if r["kind"] == "image" and r.get("w") and max(r["w"], r["h"]) < 256 and not keep_small:
-                    self.q.put(("count", gen, "small"))
+                try:
+                    src = core.Source(t["path"])
+                except OSError:
+                    self.q.put(("count", gen, "unreadable"))
                     continue
-                if r["kind"] == "noindex" and r["e"] - r["s"] < core.MB:
-                    continue
-                key = core.record_key(src, r)
-                if key in self.seen:
-                    self.q.put(("count", gen, "dup"))
-                    continue
-                self.seen.add(key)
-                self.q.put(("item", gen, r))
+                total = sum(sizes) if len(targets) > 1 else src.size
+
+                def prog(p, base=done):
+                    if time.time() - last[0] > 0.2:
+                        last[0] = time.time()
+                        self.q.put(("prog", gen, base + p, total))
+                for r in core.iter_scan(src, all_off, self.stop, prog):
+                    if gen != self.gen:
+                        break
+                    if r["kind"] == "image" and r.get("w") and max(r["w"], r["h"]) < 256 and not keep_small:
+                        self.q.put(("count", gen, "small"))
+                        continue
+                    if r["kind"] == "noindex" and r["e"] - r["s"] < core.MB:
+                        continue
+                    key = core.record_key(src, r)
+                    if key in self.seen:
+                        self.q.put(("count", gen, "dup"))
+                        continue
+                    self.seen.add(key)
+                    r["src"] = ti
+                    if r["s"] == 0 and r["e"] >= src.size - 1:
+                        r["orig"] = t.get("orig")
+                        if not r.get("date") and t.get("date"):
+                            r["date"] = t["date"]
+                    self.q.put(("item", gen, r))
+                done += src.size
+                bad += src.bad
+                src.close()
+                self.q.put(("prog", gen, done, sum(sizes) if len(targets) > 1 else done))
         except Exception as e:
             self.q.put(("error", gen, str(e)))
-        self.q.put(("done", gen, src.bad))
-        src.close()
+        self.q.put(("done", gen, bad))
 
-    def media_worker(self, path, gen):
-        try:
-            src = core.Source(path)
-        except OSError:
-            return
+    def media_worker(self, gen):
+        srcs = {}
+
+        def source(r):
+            i = r["src"]
+            if i not in srcs:
+                srcs[i] = core.Source(self.targets[i]["path"])
+            return srcs[i]
         while gen == self.gen:
             try:
                 _, _, job = self.work.get(timeout=0.5)
@@ -446,20 +559,19 @@ class App:
             r = self.records.get(iid)
             if not r:
                 continue
-            if kind == "thumb":
-                im = render_image(src, r, THUMB) if r["kind"] == "image" else None
-                self.q.put(("thumb", gen, iid, im))
-            elif kind == "preview":
-                im = render_image(src, r, PREVIEW) if r["kind"] == "image" else None
-                self.q.put(("preview", gen, iid, im))
-            elif kind == "open":
-                d = os.path.join(tempfile.gettempdir(), "fukugen_preview")
-                try:
-                    p = core.write_record(src, r, d)
-                    self.q.put(("open", gen, p))
-                except OSError as e:
+            try:
+                src = source(r)
+                if kind == "thumb":
+                    self.q.put(("thumb", gen, iid, render_image(src, r, THUMB) if r["kind"] == "image" else None))
+                elif kind == "preview":
+                    self.q.put(("preview", gen, iid, render_image(src, r, PREVIEW) if r["kind"] == "image" else None))
+                elif kind == "open":
+                    self.q.put(("open", gen, core.write_record(src, r, os.path.join(tempfile.gettempdir(), "fukugen_preview"))))
+            except OSError as e:
+                if kind != "thumb":
                     self.q.put(("error", gen, str(e)))
-        src.close()
+        for s_ in srcs.values():
+            s_.close()
 
     def stop_scan(self):
         self.stop.set()
@@ -501,9 +613,15 @@ class App:
         if kind == "item":
             self.add_record(msg[2])
         elif kind == "count":
-            self.stats[msg[2]] += 1
+            self.stats[msg[2]] = self.stats.get(msg[2], 0) + 1
         elif kind == "prog":
+            self.source_size = msg[3]
             self.show_progress(msg[2])
+        elif kind == "stage":
+            self.status.configure(text=msg[2])
+            self.pbar["value"] = msg[3] * 1000
+        elif kind == "targets":
+            self.targets = msg[2]
         elif kind == "thumb":
             iid, im = msg[2], msg[3]
             r = self.records.get(iid)
@@ -526,6 +644,7 @@ class App:
             self.stop_btn.state(["disabled"])
             self.show_progress(self.source_size if not self.stop.is_set() else None, done=True, bad=msg[2])
         elif kind == "error":
+            self.status.configure(text=msg[2])
             messagebox.showerror(APP_NAME, msg[2])
 
     def show_progress(self, pos, done=False, bad=0):
@@ -544,6 +663,8 @@ class App:
                 extra.append(f"重複 {s['dup']} 件はまとめました")
             if bad:
                 extra.append(f"読めない場所 {bad} か所")
+            if s.get("unreadable"):
+                extra.append(f"開けなかったファイル {s['unreadable']} 個")
             tail = "　チェックを付けたファイルを「チェックしたファイルを復元する」で保存してください。" if (s["image"] or s["video"] or s["noindex"]) else \
                 "　見つかりませんでした。上書きされたか、SSD の TRIM で消去された可能性があります。"
             self.status.configure(text=f"{head}{found}" + (f"（{'、'.join(extra)}）" if extra else "") + tail)
@@ -561,7 +682,7 @@ class App:
         return f == "all" or (f == "video" and r["kind"] in ("video", "noindex")) or (f == "image" and r["kind"] == "image")
 
     def add_record(self, r):
-        iid = f"f{r['s']}"
+        iid = f"f{r.get('src', 0)}_{r['s']}"
         r["checked"] = True
         self.records[iid] = r
         self.stats[r["kind"]] += 1
@@ -606,9 +727,9 @@ class App:
         idx = bisect.bisect_right(keys, -t)
         keys.insert(idx, -t)
         dims = f"{r['w']}×{r['h']}" if r.get("w") else ""
-        name = (d.strftime("%Y-%m-%d_%H%M%S") if d else f"{r['s']:012X}") + "." + r["ext"]
+        name = r.get("orig") or ((d.strftime("%Y-%m-%d_%H%M%S") if d else f"{r['s']:012X}") + "." + r["ext"])
         state = "一部欠損" if r["trunc"] and r["kind"] != "noindex" else "索引なし" if r["kind"] == "noindex" else "完全"
-        typ = {"image": "写真", "video": "動画", "noindex": "動画"}[r["kind"]] + f" {r['type'].split('/')[0]}"
+        typ = {"image": "写真", "video": "動画", "noindex": "動画"}[r["kind"]] + " " + (r["ext"].upper() if r["kind"] != "image" else r["type"])
         self.tree.insert(parent, idx, iid=iid, text=f"  {name}" + (f"  {dims}" if dims else ""),
                          values=(CHECK_ON if r["checked"] else CHECK_OFF, d.strftime("%Y/%m/%d %H:%M") if d else "不明", typ,
                                  core.fmt_size(r["e"] - r["s"]), state))
@@ -700,7 +821,11 @@ class App:
             lines.append("途中が上書きされていたため、残っている部分だけを復元します。")
         if r["kind"] != "image":
             lines.append("動画は「アプリで開いて見る」で中身を確かめられます。")
-        lines.append(f"ドライブ上の位置：{r['s']:,} バイト目")
+        t = self.targets[r.get("src", 0)] if self.targets else {}
+        if r.get("orig"):
+            lines.append(f"元のファイル：{t.get('label') or r['orig']}")
+        else:
+            lines.append(f"位置：{os.path.basename(t.get('label') or t.get('path', ''))} の {r['s']:,} バイト目")
         self.pv_info.configure(text="\n".join(lines))
         self.open_btn.state(["!disabled"])
         self.pv.configure(image="")
@@ -720,7 +845,7 @@ class App:
         out = filedialog.askdirectory(title="保存先のフォルダを選んでください（復元するドライブとは別のドライブ）")
         if not out:
             return
-        if core.same_drive(self.source_item, out):
+        if self.source_item and core.same_drive(self.source_item, out):
             messagebox.showerror(APP_NAME, "保存先が、復元するドライブと同じです。\n消えたデータを上書きしてしまうため、別のドライブのフォルダを選んでください。")
             return
         total = sum(r["e"] - r["s"] for r in chosen)
@@ -745,9 +870,13 @@ class App:
 
         def worker():
             try:
-                src = core.Source(self.source_path)
+                srcs = {}
                 o = core.Output(root, True)
                 for r in chosen:
+                    i = r.get("src", 0)
+                    if i not in srcs:
+                        srcs[i] = core.Source(self.targets[i]["path"])
+                    src = srcs[i]
                     p = core.write_record(src, r, root, on_bytes=lambda n: state.__setitem__("bytes", state["bytes"] + n))
                     state["n"] += 1
                     d = r.get("date")
@@ -755,9 +884,11 @@ class App:
                     o.records.append({"path": os.path.relpath(p, root), "kind": r["kind"], "type": r["type"],
                                       "date": d.isoformat(" ") if d else "", "w": r.get("w") or 0, "h": r.get("h") or 0,
                                       "size": r["e"] - r["s"], "offset": r["s"], "partial": bool(r["trunc"]), "model": r.get("model", "")})
-                o.write_index(self.src_label.cget("text"), self.source_size, self.source_size, time.time() - self.t0, src.bad)
+                o.write_index(self.src_label.cget("text"), self.source_size, self.source_size, time.time() - self.t0,
+                              sum(x.bad for x in srcs.values()))
                 core.give_back_ownership(root)
-                src.close()
+                for x in srcs.values():
+                    x.close()
             except Exception as e:
                 state["err"] = str(e)
             state["done"] = True

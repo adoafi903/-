@@ -480,7 +480,11 @@ def record_folder(root, r):
 
 def record_name(r):
     d = r.get("date")
-    name = (d.strftime("%Y-%m-%d_%H%M%S_") if d else "") + f"{r['s']:012X}"
+    if r.get("orig"):
+        stem = os.path.splitext(os.path.basename(r["orig"]))[0]
+        name = (d.strftime("%Y-%m-%d_%H%M%S_") if d else "") + stem
+    else:
+        name = (d.strftime("%Y-%m-%d_%H%M%S_") if d else "") + f"{r['s']:012X}"
     if r["trunc"] and r["kind"] != "noindex":
         name += "_一部欠損"
     return f"{name}.{r['ext']}"
@@ -498,6 +502,11 @@ def write_record(src, r, root, on_bytes=None):
     folder = record_folder(root, r)
     os.makedirs(folder, exist_ok=True)
     path = os.path.join(folder, record_name(r))
+    base, ext = os.path.splitext(path)
+    n = 2
+    while os.path.exists(path):
+        path = f"{base}_{n}{ext}"
+        n += 1
     with open(path, "wb") as f:
         p = r["s"]
         while p < r["e"]:
