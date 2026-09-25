@@ -279,6 +279,8 @@ class NTFS:
                 parts.append(d[0])
                 cur, depth = d[1], depth + 1
             folder = "\\" + "\\".join(reversed(parts))
+            if folder.startswith("\\$Extend\\$Deleted"):
+                folder = "（元のフォルダは削除時に Windows が記録から外しています）"
             ext = self.extents(runs, size) if runs is not None else []
             over = self.overwritten(runs) if runs else False
             out.append(make_record("NTFS", idx, name, folder, size, ext, mtime, over, resident))

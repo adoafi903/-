@@ -2,6 +2,9 @@
 # photos and a video, then recover them from the raw volume and the raw disk.
 $ErrorActionPreference = 'Continue'
 python ci_undelete_check.py prepare testfiles
+# External HDDs do not support TRIM, so deleted data stays on the disk. The test
+# disks here would honour TRIM and zero it, so switch TRIM off to match an HDD.
+fsutil behavior set DisableDeleteNotify 1
 $failed = 0
 foreach ($fs in @('NTFS', 'exFAT')) {
   $letter = if ($fs -eq 'NTFS') { 'R' } else { 'S' }

@@ -859,7 +859,7 @@ class App:
             lines.append("動画は「アプリで開いて見る」で中身を確かめられます。")
         t = self.targets[r.get("src", 0)] if self.targets else {}
         if r.get("fs"):
-            lines.append(f"元の場所：{r['folder'].rstrip(chr(92))}\\{r['orig']}")
+            lines.append(f"元の場所：{r['folder']}" if r["folder"].startswith("（") else f"元の場所：{r['folder'].rstrip(chr(92))}\\{r['orig']}")
             lines.append(f"ドライブの記録（{r['fs']}）から見つかった削除ファイルです。")
             if r.get("empty"):
                 lines.append("記録は残っていましたが、中身は 0 で消されています（取り戻せません）。")

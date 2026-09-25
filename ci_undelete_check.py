@@ -45,7 +45,7 @@ def check(device, expected, fs):
             continue
         same = hashlib.sha1(core.read_record(src, r)).hexdigest() == sha
         pieces = len([x for x in r["runs"] if x[0] is not None]) if r["runs"] else 0
-        print(f"  {name}: {r['folder']}\\{name} pieces={pieces} date={r['date']} overwritten={r['overwritten']} identical={same}")
+        print(f"  {name}: {r['folder']}\\{name} pieces={pieces} date={r['date']} overwritten={r['overwritten']} zeroed={r['empty']} identical={same}")
         ok = ok and same
     src.close()
     print(f"{fs} {device}: {'PASS' if ok else 'FAIL'}")
