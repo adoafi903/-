@@ -32,6 +32,10 @@ jobs:
         run: python -c "import fukugen, app; print('ok')"
       - name: Recovery self-test
         run: python selftest.py
+      - name: Recover files Windows deleted from real NTFS and exFAT drives
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./ci_undelete_windows.ps1
       - name: iPhone USB script runs (no phone attached)
         if: runner.os == 'Windows'
         run: python ci_usb_check.py

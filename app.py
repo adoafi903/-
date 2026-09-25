@@ -24,6 +24,7 @@ from tkinter import filedialog, messagebox, ttk
 
 import fukugen as core
 import iphone
+import undelete
 
 try:
     from PIL import Image, ImageDraw, ImageFile, ImageOps, ImageTk
@@ -150,10 +151,9 @@ def render_image(src, r, size):
     """Decode a found photo into a PIL image no bigger than size x size. None when it cannot be shown."""
     if not HAS_PIL or r["kind"] != "image":
         return None
-    n = r["e"] - r["s"]
-    if n > 80 * core.MB:
+    if r["e"] - r["s"] > 80 * core.MB:
         return None
-    data = src.read_at(r["s"], n) + core.record_tail(r)
+    data = core.read_record(src, r)
     try:
         im = Image.open(io.BytesIO(data))
         if im.format == "JPEG":
@@ -192,6 +192,7 @@ class App:
         self.filter = tk.StringVar(value="all")
         self.keep_small = tk.BooleanVar(value=False)
         self.all_offsets = tk.BooleanVar(value=False)
+        self.all_types = tk.BooleanVar(value=False)
         self.gen = 0
         self.build_start()
         self.build_results()
@@ -254,7 +255,8 @@ class App:
         opts = ttk.Frame(f)
         opts.pack(fill="x", pady=(10, 0))
         ttk.Checkbutton(opts, text="アイコンなど小さい画像も探す", variable=self.keep_small).pack(side="left")
-        ttk.Checkbutton(opts, text="ファイルの区切り以外も探す（時間がかかるが、見つかる数が増えることがある）", variable=self.all_offsets).pack(side="left", padx=(16, 0))
+        ttk.Checkbutton(opts, text="写真・動画以外の削除ファイル（書類など）も探す", variable=self.all_types).pack(side="left", padx=(16, 0))
+        ttk.Checkbutton(opts, text="ファイルの区切り以外も探す（時間がかかる）", variable=self.all_offsets).pack(side="left", padx=(16, 0))
         bar = ttk.Frame(f)
         bar.pack(fill="x", pady=(14, 0))
         ttk.Button(bar, text="一覧を更新", command=self.refresh_drives).pack(side="left")
@@ -322,7 +324,10 @@ class App:
                                                        ("ドライブのイメージ", "*.img *.dd *.bin *.raw *.iso *.dmg *.001")])
         if paths:
             label = os.path.basename(paths[0]) if len(paths) == 1 else f"{len(paths)} 個のファイル"
-            self.begin_targets([iphone.file_target(p) for p in paths], label)
+            targets = [iphone.file_target(p) for p in paths]
+            for t in targets:
+                t["raw"] = os.path.splitext(t["path"])[1].lower() in undelete.DISK_IMAGE_EXT
+            self.begin_targets(targets, label)
 
     def pick_folder(self):
         d = filedialog.askdirectory(title="調べるフォルダを選んでください")
@@ -394,7 +399,7 @@ class App:
         self.stop_btn.pack(side="right")
         self.pbar = ttk.Progressbar(f, maximum=1000)
         self.pbar.pack(fill="x", pady=(10, 4))
-        self.status = ttk.Label(f, text="")
+        self.status = ttk.Label(f, text="", wraplength=1120, justify="left")
         self.status.pack(anchor="w")
 
         bot = ttk.Frame(f)
@@ -454,7 +459,7 @@ class App:
             return
         src.close()
         label = (item or {}).get("label", os.path.basename(path)).strip()
-        self.begin_targets([{"path": path, "orig": None, "label": label}], label, item)
+        self.begin_targets([{"path": path, "orig": None, "label": label, "raw": True}], label, item)
 
     def begin_targets(self, targets, label, item=None, prep=None):
         self.reset()
@@ -489,7 +494,7 @@ class App:
         self.update_selection()
 
     def scan_worker(self, targets, prep, gen):
-        keep_small, all_off = self.keep_small.get(), self.all_offsets.get()
+        keep_small, all_off, all_types = self.keep_small.get(), self.all_offsets.get(), self.all_types.get()
         bad = 0
         try:
             if prep:
@@ -511,6 +516,30 @@ class App:
                     self.q.put(("count", gen, "unreadable"))
                     continue
                 total = sum(sizes) if len(targets) > 1 else src.size
+                known = set()
+                if t.get("raw"):
+                    fsname = [""]
+
+                    def on_vol(kind):
+                        fsname[0] = kind
+                        self.q.put(("stage", gen, f"削除したファイルの記録（{kind}）を調べています…", 0))
+
+                    def fs_prog(f, last_t=[0.0]):
+                        if time.time() - last_t[0] > 0.3:
+                            last_t[0] = time.time()
+                            self.q.put(("stage", gen, f"削除したファイルの記録（{fsname[0]}）を調べています… {int(f * 100)}%", f))
+                    for r in undelete.scan(src, all_types, fs_prog, self.stop, on_vol):
+                        if gen != self.gen or self.stop.is_set():
+                            break
+                        key = core.record_key(src, r)
+                        if key in self.seen:
+                            self.q.put(("count", gen, "dup"))
+                            continue
+                        self.seen.add(key)
+                        known.add(r["s"])
+                        r["src"] = ti
+                        self.q.put(("item", gen, r))
+                    self.q.put(("stage", gen, "空き領域から写真・動画を探しています…", 0))
 
                 def prog(p, base=done):
                     if time.time() - last[0] > 0.2:
@@ -519,6 +548,8 @@ class App:
                 for r in core.iter_scan(src, all_off, self.stop, prog):
                     if gen != self.gen:
                         break
+                    if r["s"] in known:
+                        continue
                     if r["kind"] == "image" and r.get("w") and max(r["w"], r["h"]) < 256 and not keep_small:
                         self.q.put(("count", gen, "small"))
                         continue
@@ -650,7 +681,8 @@ class App:
 
     def show_progress(self, pos, done=False, bad=0):
         s = self.stats
-        found = f"写真・画像 {s['image']} 件　動画 {s['video']} 件"
+        found = f"写真・画像 {s['image']} 件　動画 {s['video']} 件" + (f"　その他 {s['other']} 件" if s.get("other") else "") + \
+            (f"（うち元の名前で見つかった削除ファイル {s['named']} 件）" if s.get("named") else "")
         if done:
             if pos is not None:
                 self.pbar["value"] = 1000
@@ -683,10 +715,12 @@ class App:
         return f == "all" or (f == "video" and r["kind"] in ("video", "noindex")) or (f == "image" and r["kind"] == "image")
 
     def add_record(self, r):
-        iid = f"f{r.get('src', 0)}_{r['s']}"
-        r["checked"] = True
+        iid = f"f{r.get('src', 0)}_{r.get('uid', r['s'])}"
+        r["checked"] = not r.get("empty")
         self.records[iid] = r
-        self.stats[r["kind"]] += 1
+        self.stats[r["kind"]] = self.stats.get(r["kind"], 0) + 1
+        if r.get("fs"):
+            self.stats["named"] = self.stats.get("named", 0) + 1
         if self.matches(r):
             self.insert_row(iid, r)
         self.update_selection()
@@ -729,8 +763,9 @@ class App:
         keys.insert(idx, -t)
         dims = f"{r['w']}×{r['h']}" if r.get("w") else ""
         name = r.get("orig") or ((d.strftime("%Y-%m-%d_%H%M%S") if d else f"{r['s']:012X}") + "." + r["ext"])
-        state = "一部欠損" if r["trunc"] and r["kind"] != "noindex" else "索引なし" if r["kind"] == "noindex" else "完全"
-        typ = {"image": "写真", "video": "動画", "noindex": "動画"}[r["kind"]] + " " + (r["ext"].upper() if r["kind"] != "image" else r["type"])
+        state = ("中身が消えています" if r.get("empty") else "上書きの可能性" if r.get("overwritten") else
+                 "一部欠損" if r["trunc"] and r["kind"] != "noindex" else "索引なし" if r["kind"] == "noindex" else "完全")
+        typ = {"image": "写真", "video": "動画", "noindex": "動画", "other": "ファイル"}[r["kind"]] + " " + (r["ext"].upper() if r["kind"] != "image" else r["type"])
         self.tree.insert(parent, idx, iid=iid, text=f"  {name}" + (f"  {dims}" if dims else ""),
                          values=(CHECK_ON if r["checked"] else CHECK_OFF, d.strftime("%Y/%m/%d %H:%M") if d else "不明", typ,
                                  core.fmt_size(r["e"] - r["s"]), state))
@@ -740,7 +775,7 @@ class App:
             if r["kind"] == "image":
                 self.work.put((1, r["s"], ("thumb", iid)))
             else:
-                ph = ImageTk.PhotoImage(placeholder("video", THUMB))
+                ph = ImageTk.PhotoImage(placeholder("video" if r["kind"] != "other" else "file", THUMB))
                 self.photos[iid] = ph
                 self.tree.item(iid, image=ph)
         self.bump(yid, 1)
@@ -823,7 +858,14 @@ class App:
         if r["kind"] != "image":
             lines.append("動画は「アプリで開いて見る」で中身を確かめられます。")
         t = self.targets[r.get("src", 0)] if self.targets else {}
-        if r.get("orig"):
+        if r.get("fs"):
+            lines.append(f"元の場所：{r['folder'].rstrip(chr(92))}\\{r['orig']}")
+            lines.append(f"ドライブの記録（{r['fs']}）から見つかった削除ファイルです。")
+            if r.get("empty"):
+                lines.append("記録は残っていましたが、中身は 0 で消されています（取り戻せません）。")
+            elif r.get("overwritten"):
+                lines.append("この場所の一部に、あとから別のデータが書かれています。中身が壊れているかもしれません。")
+        elif r.get("orig"):
             lines.append(f"元のファイル：{t.get('label') or r['orig']}")
         else:
             lines.append(f"位置：{os.path.basename(t.get('label') or t.get('path', ''))} の {r['s']:,} バイト目")

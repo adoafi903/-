@@ -497,6 +497,24 @@ def record_tail(r):
     return {"jpg": b"\xff\xd9", "png": b"\0\0\0\0IEND\xaeB`\x82", "gif": b"\x3b"}.get(r["ext"], b"")
 
 
+def read_record(src, r, limit=None):
+    """Bytes of a found item, following its pieces when the file system stored it in several places."""
+    if "runs" not in r:
+        n = r["e"] - r["s"]
+        whole = limit is None or limit >= n
+        return src.read_at(r["s"], n if whole else limit) + (record_tail(r) if whole else b"")
+    size = r["size"] if limit is None else min(limit, r["size"])
+    if r.get("resident") is not None:
+        return r["resident"][:size]
+    out = bytearray()
+    for off, n in r["runs"]:
+        if len(out) >= size:
+            break
+        k = min(n, size - len(out))
+        out += b"\0" * k if off is None else src.read_at(off, k)
+    return bytes(out)
+
+
 def write_record(src, r, root, on_bytes=None):
     """Copy one recovered item out of the drive into root/<year>/<month>/. Returns the path."""
     folder = record_folder(root, r)
@@ -508,20 +526,38 @@ def write_record(src, r, root, on_bytes=None):
         path = f"{base}_{n}{ext}"
         n += 1
     with open(path, "wb") as f:
-        p = r["s"]
-        while p < r["e"]:
-            n = min(BLOCK, r["e"] - p)
-            f.write(src.read_at(p, n))
-            p += n
-            if on_bytes:
-                on_bytes(n)
-        f.write(record_tail(r))
+        if r.get("resident") is not None:
+            f.write(r["resident"])
+        elif "runs" in r:
+            for off, ln in r["runs"]:
+                p = 0
+                while p < ln:
+                    n = min(BLOCK, ln - p)
+                    f.write(b"\0" * n if off is None else src.read_at(off + p, n))
+                    p += n
+                    if on_bytes:
+                        on_bytes(n)
+        else:
+            p = r["s"]
+            while p < r["e"]:
+                n = min(BLOCK, r["e"] - p)
+                f.write(src.read_at(p, n))
+                p += n
+                if on_bytes:
+                    on_bytes(n)
+            f.write(record_tail(r))
+    if r.get("mtime"):
+        try:
+            t = r["mtime"].timestamp()
+            os.utime(path, (t, t))
+        except (OSError, ValueError, OverflowError):
+            pass
     return path
 
 
 def record_key(src, r):
     size = r["e"] - r["s"]
-    return (size, hashlib.sha1(src.read_at(r["s"], min(size, MB))).hexdigest())
+    return (size, hashlib.sha1(read_record(src, r, MB)).hexdigest())
 
 
 class Output:
