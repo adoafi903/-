@@ -661,8 +661,8 @@ def scan(src, out, all_offsets, label):
 def run(cmd):
     try:
         flags = 0x08000000 if IS_WIN else 0  # CREATE_NO_WINDOW: no console flash from the app
-        return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
-                              creationflags=flags).stdout
+        return subprocess.run(cmd, capture_output=True, stdin=subprocess.DEVNULL, text=True, encoding="utf-8",
+                              errors="replace", timeout=60, creationflags=flags).stdout
     except Exception:
         return ""
 
@@ -698,13 +698,13 @@ def list_drives():
     elif IS_MAC:
         import plistlib
         try:
-            data = plistlib.loads(subprocess.run(["diskutil", "list", "-plist"], capture_output=True, timeout=60).stdout)
+            data = plistlib.loads(subprocess.run(["diskutil", "list", "-plist"], capture_output=True, stdin=subprocess.DEVNULL, timeout=60).stdout)
         except Exception:
             data = {}
         for d in data.get("AllDisksAndPartitions", []):
             ident = d.get("DeviceIdentifier")
             try:
-                info = plistlib.loads(subprocess.run(["diskutil", "info", "-plist", ident], capture_output=True, timeout=60).stdout)
+                info = plistlib.loads(subprocess.run(["diskutil", "info", "-plist", ident], capture_output=True, stdin=subprocess.DEVNULL, timeout=60).stdout)
             except Exception:
                 info = {}
             internal = info.get("Internal", False)

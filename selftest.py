@@ -17,16 +17,22 @@ def png(w, h, rgb):
         chunk(b"tIME", struct.pack(">HBBBBB", 2019, 8, 3, 14, 22, 10)) + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b"")
 
 
-def main():
+def make_card_image(path):
+    """Write a card image whose free space holds three deleted photos. Returns their bytes."""
     files = [png(640, 480, (200, 100, 50)), png(1024, 768, (20, 120, 220)), png(300, 300, (0, 0, 0))]
     img = bytearray(os.urandom(65536))
     for f in files:
         img += b"\0" * (-len(img) % 512) + f + os.urandom(7000)
+    with open(path, "wb") as fh:
+        fh.write(img)
+    return files
+
+
+def main():
     tmp = tempfile.mkdtemp()
     try:
         path = os.path.join(tmp, "card.img")
-        with open(path, "wb") as fh:
-            fh.write(img)
+        files = make_card_image(path)
         src = core.Source(path)
         out = os.path.join(tmp, "out")
         got = {hashlib.sha1(open(core.write_record(src, r, out), "rb").read()).hexdigest() for r in core.iter_scan(src)}

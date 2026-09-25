@@ -17,6 +17,7 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
@@ -40,6 +41,42 @@ THUMB = 48
 PREVIEW = 360
 CHECK_ON, CHECK_OFF, CHECK_MIXED = "☑", "☐", "▣"
 FROZEN = getattr(sys, "frozen", False)
+T0 = time.time()
+LOG_DIR = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "Fukugen")
+
+
+def log_error(text):
+    """Keep startup and runtime errors in a file the user can send, since the app has no console."""
+    try:
+        os.makedirs(LOG_DIR, exist_ok=True)
+        path = os.path.join(LOG_DIR, "error.log")
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + text + "\n")
+        return path
+    except OSError:
+        return ""
+
+
+def show_fatal(text):
+    path = log_error(text)
+    msg = "アプリを起動できませんでした。\n\n" + text[-1500:] + (f"\n\n記録: {path}" if path else "")
+    try:
+        r = tk.Tk()
+        r.withdraw()
+        messagebox.showerror(APP_NAME, msg, parent=r)
+        r.destroy()
+    except Exception:
+        if core.IS_WIN:
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(None, msg, APP_NAME, 0x10)
+
+
+def close_splash():
+    try:
+        import pyi_splash
+        pyi_splash.close()
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------- admin
@@ -58,7 +95,7 @@ def mac_grant_read(path):
     """Ask for the admin password once and allow this user to read the raw device until it is unplugged."""
     cmd = "chmod o+r " + shlex.quote(path)
     script = f'do shell script "{cmd}" with administrator privileges'
-    return subprocess.run(["osascript", "-e", script], capture_output=True).returncode == 0
+    return subprocess.run(["osascript", "-e", script], capture_output=True, stdin=subprocess.DEVNULL).returncode == 0
 
 
 def open_source(path, parent):
@@ -743,19 +780,78 @@ class App:
         tick()
 
 
+def gui_selftest(root, app, out_path):
+    """Start-up check used by the build: list drives, scan a small card image, write the result."""
+    import json
+    import selftest
+    res = {"ok": False, "startup_seconds": round(time.time() - T0, 1)}
+    tmp = tempfile.mkdtemp()
+    img = os.path.join(tmp, "card.img")
+    selftest.make_card_image(img)
+    t = time.time()
+
+    def finish():
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(res, f, ensure_ascii=False)
+        root.destroy()
+
+    def wait_scan():
+        if app.scanning and time.time() - t < 90:
+            root.after(300, wait_scan)
+            return
+        res["found"] = len(app.records)
+        res["thumbnails"] = len(app.photos)
+        res["ok"] = res["found"] >= 3 and res["thumbnails"] >= 3
+        root.after(1500, finish)
+
+    def wait_drives():
+        if not app.drives and time.time() - t < 45:
+            root.after(300, wait_drives)
+            return
+        res["drives"] = [d["label"] for d in app.drives]
+        app.begin(img, None)
+        root.after(500, wait_scan)
+
+    wait_drives()
+
+
 def main():
-    if core.IS_WIN and not core.is_admin() and "--no-elevate" not in sys.argv:
+    selftest_out = sys.argv[sys.argv.index("--selftest-gui") + 1] if "--selftest-gui" in sys.argv else None
+    if core.IS_WIN and not selftest_out and not core.is_admin() and "--no-elevate" not in sys.argv:
         try:
             if relaunch_elevated():
+                close_splash()
                 return
         except Exception:
-            pass
-    root = tk.Tk()
-    app = App(root)
-    images = [a for a in sys.argv[1:] if os.path.isfile(a)]
-    if images:
-        root.after(300, lambda: app.begin(images[0], None))
-    root.mainloop()
+            log_error(traceback.format_exc())
+    try:
+        root = tk.Tk()
+
+        def report(*exc):
+            text = "".join(traceback.format_exception(*exc))
+            path = log_error(text)
+            messagebox.showerror(APP_NAME, "予期しないエラーが起きました。\n\n" + text[-800:] + (f"\n\n記録: {path}" if path else ""))
+        root.report_callback_exception = report
+        app = App(root)
+        close_splash()
+        root.lift()
+        root.attributes("-topmost", True)
+        root.after(800, lambda: root.attributes("-topmost", False))
+        root.focus_force()
+        if selftest_out:
+            gui_selftest(root, app, selftest_out)
+        else:
+            images = [a for a in sys.argv[1:] if os.path.isfile(a)]
+            if images:
+                root.after(300, lambda: app.begin(images[0], None))
+        root.mainloop()
+    except Exception:
+        close_splash()
+        text = traceback.format_exc()
+        if selftest_out:
+            with open(selftest_out, "w", encoding="utf-8") as f:
+                f.write('{"ok": false, "error": %r}' % text)
+        show_fatal(text)
 
 
 if __name__ == "__main__":

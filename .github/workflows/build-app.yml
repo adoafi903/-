@@ -35,13 +35,39 @@ jobs:
       - name: Build Windows app
         if: runner.os == 'Windows'
         run: |
-          pyinstaller --noconfirm --onefile --windowed --uac-admin --name Fukugen --collect-all pillow_heif --hidden-import PIL._tkinter_finder app.py
+          python make_splash.py
+          pyinstaller --noconfirm --onefile --windowed --uac-admin --splash splash.png --name Fukugen --collect-all pillow_heif --hidden-import PIL._tkinter_finder --hidden-import selftest app.py
           Move-Item dist/Fukugen.exe dist/Fukugen-Windows.exe
+      - name: Open the built Windows app and scan a test card
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $out = Join-Path $PWD "gui.json"
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          $p = Start-Process -FilePath dist/Fukugen-Windows.exe -ArgumentList "--selftest-gui", "`"$out`"" -PassThru
+          $null = $p.WaitForExit(180000)
+          "app closed after $([math]::Round($sw.Elapsed.TotalSeconds,1)) seconds"
+          if (Test-Path $out) { Get-Content $out } else { "no result file" }
+          $log = Join-Path $env:LOCALAPPDATA "Fukugen\error.log"
+          if (Test-Path $log) { Get-Content $log }
+          if (-not (Test-Path $out) -or -not (Select-String -Path $out -Pattern '"ok": true' -Quiet)) { exit 1 }
       - name: Build Mac app
         if: runner.os == 'macOS'
         run: |
-          pyinstaller --noconfirm --windowed --name Fukugen --collect-all pillow_heif --hidden-import PIL._tkinter_finder app.py
+          pyinstaller --noconfirm --windowed --name Fukugen --collect-all pillow_heif --hidden-import PIL._tkinter_finder --hidden-import selftest app.py
           cd dist && ditto -c -k --keepParent Fukugen.app Fukugen-${{ matrix.label }}.zip
+      - name: Open the built Mac app and scan a test card
+        if: runner.os == 'macOS'
+        run: |
+          start=$(date +%s)
+          dist/Fukugen.app/Contents/MacOS/Fukugen --selftest-gui "$PWD/gui.json" &
+          pid=$!
+          for i in $(seq 1 180); do kill -0 $pid 2>/dev/null || break; sleep 1; done
+          kill $pid 2>/dev/null || true
+          echo "app closed after $(( $(date +%s) - start )) seconds"
+          cat gui.json || echo "no result file"
+          cat ~/Fukugen/error.log 2>/dev/null || true
+          grep -q '"ok": true' gui.json
       - uses: actions/upload-artifact@v4
         with:
           name: Fukugen-${{ matrix.label }}
