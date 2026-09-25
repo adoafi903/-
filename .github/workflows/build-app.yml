@@ -38,6 +38,12 @@ jobs:
           python make_splash.py
           pyinstaller --noconfirm --onefile --windowed --uac-admin --splash splash.png --name Fukugen --collect-all pillow_heif --hidden-import PIL._tkinter_finder --hidden-import selftest app.py
           Move-Item dist/Fukugen.exe dist/Fukugen-Windows.exe
+          pyinstaller --noconfirm --onedir --windowed --uac-admin --name Fukugen --distpath folder --workpath build_folder --collect-all pillow_heif --hidden-import PIL._tkinter_finder --hidden-import selftest app.py
+          Compress-Archive -Path folder/Fukugen -DestinationPath dist/Fukugen-Windows.zip
+          $p = Start-Process -FilePath folder/Fukugen/Fukugen.exe -ArgumentList "--selftest-gui", "`"$PWD\gui_folder.json`"" -PassThru
+          $null = $p.WaitForExit(180000)
+          Get-Content gui_folder.json
+          if (-not (Select-String -Path gui_folder.json -Pattern '"ok": true' -Quiet)) { exit 1 }
       - name: Open the built Windows app and scan a test card
         if: runner.os == 'Windows'
         shell: pwsh
