@@ -1,0 +1,70 @@
+name: Build app
+
+on:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: Windows
+          - os: macos-14
+            label: Mac-AppleSilicon
+          - os: macos-15-intel
+            label: Mac-Intel
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install build tools
+        run: python -m pip install pyinstaller pillow pillow-heif
+      - name: Check that the engine and app load
+        run: python -c "import fukugen, app; print('ok')"
+      - name: Recovery self-test
+        run: python selftest.py
+      - name: Build Windows app
+        if: runner.os == 'Windows'
+        run: |
+          pyinstaller --noconfirm --onefile --windowed --uac-admin --name Fukugen --collect-all pillow_heif --hidden-import PIL._tkinter_finder app.py
+          Move-Item dist/Fukugen.exe dist/Fukugen-Windows.exe
+      - name: Build Mac app
+        if: runner.os == 'macOS'
+        run: |
+          pyinstaller --noconfirm --windowed --name Fukugen --collect-all pillow_heif --hidden-import PIL._tkinter_finder app.py
+          cd dist && ditto -c -k --keepParent Fukugen.app Fukugen-${{ matrix.label }}.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Fukugen-${{ matrix.label }}
+          path: dist/Fukugen-*
+
+  release:
+    needs: build
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - name: Publish download
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -la out
+          if ! gh release view app-latest >/dev/null 2>&1; then
+            gh release create app-latest --title "復元アプリ（最新版）" --notes-file RELEASE_NOTES.md --latest --target "$GITHUB_SHA"
+          else
+            gh release edit app-latest --notes-file RELEASE_NOTES.md --latest
+          fi
+          gh release upload app-latest out/* --clobber

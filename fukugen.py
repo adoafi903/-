@@ -469,6 +469,52 @@ SIGNATURES = [
 
 # ---------------------------------------------------------------- output
 
+def record_folder(root, r):
+    d = r.get("date")
+    if r["kind"] == "noindex":
+        return os.path.join(root, "索引が無い動画")
+    if d:
+        return os.path.join(root, f"{d.year}年", f"{d.month:02d}月")
+    return os.path.join(root, "日付不明", "動画" if r["kind"] == "video" else "写真・画像")
+
+
+def record_name(r):
+    d = r.get("date")
+    name = (d.strftime("%Y-%m-%d_%H%M%S_") if d else "") + f"{r['s']:012X}"
+    if r["trunc"] and r["kind"] != "noindex":
+        name += "_一部欠損"
+    return f"{name}.{r['ext']}"
+
+
+def record_tail(r):
+    """Bytes appended to a truncated file so viewers can open what is left."""
+    if not r["trunc"]:
+        return b""
+    return {"jpg": b"\xff\xd9", "png": b"\0\0\0\0IEND\xaeB`\x82", "gif": b"\x3b"}.get(r["ext"], b"")
+
+
+def write_record(src, r, root, on_bytes=None):
+    """Copy one recovered item out of the drive into root/<year>/<month>/. Returns the path."""
+    folder = record_folder(root, r)
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, record_name(r))
+    with open(path, "wb") as f:
+        p = r["s"]
+        while p < r["e"]:
+            n = min(BLOCK, r["e"] - p)
+            f.write(src.read_at(p, n))
+            p += n
+            if on_bytes:
+                on_bytes(n)
+        f.write(record_tail(r))
+    return path
+
+
+def record_key(src, r):
+    size = r["e"] - r["s"]
+    return (size, hashlib.sha1(src.read_at(r["s"], min(size, MB))).hexdigest())
+
+
 class Output:
     def __init__(self, root, keep_small):
         self.root = root
@@ -484,35 +530,13 @@ class Output:
             return
         if r["kind"] == "noindex" and size < MB:
             return
-        key = (size, hashlib.sha1(src.read_at(r["s"], min(size, MB))).hexdigest())
+        key = record_key(src, r)
         if key in self.seen:
             self.counts["dup"] += 1
             return
         self.seen.add(key)
         d = r.get("date")
-        if r["kind"] == "noindex":
-            folder = os.path.join(self.root, "索引が無い動画")
-        elif d:
-            folder = os.path.join(self.root, f"{d.year}年", f"{d.month:02d}月")
-        else:
-            folder = os.path.join(self.root, "日付不明", "動画" if r["kind"] == "video" else "写真・画像")
-        os.makedirs(folder, exist_ok=True)
-        name = (d.strftime("%Y-%m-%d_%H%M%S_") if d else "") + f"{r['s']:012X}"
-        if r["trunc"] and r["kind"] != "noindex":
-            name += "_一部欠損"
-        path = os.path.join(folder, f"{name}.{r['ext']}")
-        with open(path, "wb") as f:
-            p = r["s"]
-            while p < r["e"]:
-                n = min(BLOCK, r["e"] - p)
-                f.write(src.read_at(p, n))
-                p += n
-            if r["trunc"] and r["ext"] == "jpg":
-                f.write(b"\xff\xd9")
-            elif r["trunc"] and r["ext"] == "png":
-                f.write(b"\0\0\0\0IEND\xaeB`\x82")
-            elif r["trunc"] and r["ext"] == "gif":
-                f.write(b"\x3b")
+        path = write_record(src, r, self.root)
         self.counts[r["kind"]] += 1
         if r["trunc"] and r["kind"] != "noindex":
             self.counts["partial"] += 1
@@ -564,14 +588,48 @@ h2{{font-size:20px;border-bottom:1px solid #D5DEE3;padding-bottom:4px;margin:28p
 
 # ---------------------------------------------------------------- scan
 
+def iter_scan(src, all_offsets=False, stop=None, on_progress=None):
+    """Walk the whole drive and yield every photo/video found (dicts with s, e, kind, ext, date...)."""
+    pos, next_free = 0, 0
+    while pos < src.size and not (stop and stop.is_set()):
+        buf = src.read_at(pos, CHUNK + 16)
+        if not buf:
+            break
+        hits = []
+        lim = min(CHUNK, len(buf))
+        for sig, back, fn in SIGNATURES:
+            i = buf.find(sig)
+            while 0 <= i < lim:
+                s = pos + i - back
+                if s >= 0 and (all_offsets or s % 512 == 0):
+                    hits.append((s, fn))
+                i = buf.find(sig, i + 1)
+        hits.sort(key=lambda x: x[0])
+        for s, fn in hits:
+            if s < next_free or (stop and stop.is_set()):
+                continue
+            try:
+                r = fn(src, s)
+            except Exception:
+                r = None
+            if r and r["e"] > s:
+                next_free = max(next_free, r["e"])
+                yield r
+        pos += lim
+        if next_free > pos:
+            pos = next_free // 512 * 512
+        if on_progress:
+            on_progress(min(pos, src.size))
+
+
 def scan(src, out, all_offsets, label):
     t0, last = time.time(), 0
-    pos, next_free = 0, 0
+    state = {"pos": 0}
     stopped = False
 
     def progress(final=False):
         el = time.time() - t0
-        done = min(pos, src.size)
+        done = min(state["pos"], src.size)
         speed = done / el if el > 0 else 0
         eta = (src.size - done) / speed if speed else None
         pct = done / src.size * 100 if src.size else 0
@@ -581,49 +639,30 @@ def scan(src, out, all_offsets, label):
         sys.stdout.write("\r" + line + "   ")
         sys.stdout.flush()
 
+    def on_progress(p):
+        nonlocal last
+        state["pos"] = p
+        if time.time() - last > 0.5:
+            last = time.time()
+            progress()
+
     try:
-        while pos < src.size:
-            buf = src.read_at(pos, CHUNK + 16)
-            if not buf:
-                break
-            hits = []
-            lim = min(CHUNK, len(buf))
-            for sig, back, fn in SIGNATURES:
-                i = buf.find(sig)
-                while 0 <= i < lim:
-                    s = pos + i - back
-                    if s >= 0 and (all_offsets or s % 512 == 0):
-                        hits.append((s, fn))
-                    i = buf.find(sig, i + 1)
-            hits.sort(key=lambda x: x[0])
-            for s, fn in hits:
-                if s < next_free:
-                    continue
-                try:
-                    r = fn(src, s)
-                except Exception:
-                    r = None
-                if r and r["e"] > s:
-                    out.save(src, r)
-                    next_free = max(next_free, r["e"])
-            pos += lim
-            if next_free > pos:
-                pos = next_free // 512 * 512
-            if time.time() - last > 0.5:
-                last = time.time()
-                progress()
+        for r in iter_scan(src, all_offsets, on_progress=on_progress):
+            out.save(src, r)
     except KeyboardInterrupt:
         stopped = True
     progress(final=not stopped)
     print()
-    return min(pos, src.size), time.time() - t0, stopped
+    return min(state["pos"], src.size), time.time() - t0, stopped
 
 
 # ---------------------------------------------------------------- drives
 
 def run(cmd):
     try:
-        return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60).stdout
+        flags = 0x08000000 if IS_WIN else 0  # CREATE_NO_WINDOW: no console flash from the app
+        return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
+                              creationflags=flags).stdout
     except Exception:
         return ""
 
