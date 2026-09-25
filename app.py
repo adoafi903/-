@@ -975,8 +975,11 @@ def gui_selftest(root, app, out_path):
             return
         res["found"] = len(app.records)
         res["thumbnails"] = len(app.photos)
+        if res["thumbnails"] < res["found"] and time.time() - t < 90:
+            root.after(300, wait_scan)
+            return
         res["ok"] = res["found"] >= 3 and res["thumbnails"] >= 3
-        root.after(1500, finish)
+        root.after(500, finish)
 
     def wait_drives():
         if not app.drives and time.time() - t < 45:

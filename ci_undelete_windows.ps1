@@ -20,6 +20,11 @@ foreach ($fs in @('NTFS', 'exFAT')) {
   Get-ChildItem "$($letter):\fill*.bin" | Where-Object { [int]($_.BaseName -replace 'fill', '') % 2 -eq 0 } | Remove-Item -Force
   New-Item -ItemType Directory "$($letter):\DCIM\100CANON" | Out-Null
   Copy-Item testfiles\* "$($letter):\DCIM\100CANON\"
+  # Real photos sit on the disk long before they are deleted; make sure these
+  # copies reach the disk too instead of being deleted straight from the cache.
+  Write-VolumeCache -DriveLetter $letter
+  Start-Sleep -Seconds 5
+  Write-VolumeCache -DriveLetter $letter
   Remove-Item "$($letter):\DCIM" -Recurse -Force
   Write-VolumeCache -DriveLetter $letter
   "$fs volume: filled $i MB, then deleted DCIM"
