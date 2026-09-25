@@ -1,8 +1,11 @@
 """Run the Windows iPhone import script on a machine with no phone: it must report that no phone was found."""
+import sys
 import tempfile
 import threading
 
 import iphone
+
+sys.stdout.reconfigure(encoding="utf-8")
 
 print("detect:", iphone.detect_usb())
 try:
